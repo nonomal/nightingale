@@ -1,39 +1,22 @@
 package models
 
 import (
-	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"html/template"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
-	"path"
 	"regexp"
-	"sort"
-	"strconv"
-	"strings"
 	"time"
-	"unicode/utf8"
 
-	"github.com/ccfos/nightingale/v6/pkg/cmdx"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
 	"github.com/ccfos/nightingale/v6/pkg/poster"
-	"github.com/ccfos/nightingale/v6/pkg/tplx"
-	"github.com/google/uuid"
-
 	"github.com/pkg/errors"
-	"github.com/toolkits/pkg/file"
 	"github.com/toolkits/pkg/logger"
 	"gopkg.in/gomail.v2"
 )
+
+var VerifyByProvider func(*NotifyChannelConfig) error
 
 type EmailContext struct {
 	NotifyRuleId int64
@@ -57,11 +40,12 @@ type NotifyChannelConfig struct {
 	RequestType   string         `json:"request_type"` // http, stmp, script, flashduty
 	RequestConfig *RequestConfig `json:"request_config,omitempty" gorm:"serializer:json"`
 
-	Weight   int    `json:"weight"` // 权重，根据此字段对内置模板进行排序
-	CreateAt int64  `json:"create_at"`
-	CreateBy string `json:"create_by"`
-	UpdateAt int64  `json:"update_at"`
-	UpdateBy string `json:"update_by"`
+	Weight           int    `json:"weight"` // 权重，根据此字段对内置模板进行排序
+	CreateAt         int64  `json:"create_at"`
+	CreateBy         string `json:"create_by"`
+	UpdateAt         int64  `json:"update_at"`
+	UpdateBy         string `json:"update_by"`
+	UpdateByNickname string `json:"update_by_nickname" gorm:"-"`
 }
 
 func (ncc *NotifyChannelConfig) TableName() string {
@@ -69,10 +53,18 @@ func (ncc *NotifyChannelConfig) TableName() string {
 }
 
 type RequestConfig struct {
-	HTTPRequestConfig      *HTTPRequestConfig      `json:"http_request_config,omitempty" gorm:"serializer:json"`
-	SMTPRequestConfig      *SMTPRequestConfig      `json:"smtp_request_config,omitempty" gorm:"serializer:json"`
-	ScriptRequestConfig    *ScriptRequestConfig    `json:"script_request_config,omitempty" gorm:"serializer:json"`
-	FlashDutyRequestConfig *FlashDutyRequestConfig `json:"flashduty_request_config,omitempty" gorm:"serializer:json"`
+	HTTPRequestConfig        *HTTPRequestConfig        `json:"http_request_config,omitempty" gorm:"serializer:json"`
+	SMTPRequestConfig        *SMTPRequestConfig        `json:"smtp_request_config,omitempty" gorm:"serializer:json"`
+	ScriptRequestConfig      *ScriptRequestConfig      `json:"script_request_config,omitempty" gorm:"serializer:json"`
+	FlashDutyRequestConfig   *FlashDutyRequestConfig   `json:"flashduty_request_config,omitempty" gorm:"serializer:json"`
+	PagerDutyRequestConfig   *PagerDutyRequestConfig   `json:"pagerduty_request_config,omitempty" gorm:"serializer:json"`
+	DingtalkAppRequestConfig *DingtalkAppRequestConfig `json:"dingtalkapp_request_config,omitempty" gorm:"serializer:json"`
+	FeishuAppRequestConfig   *FeishuAppRequestConfig   `json:"feishuapp_request_config,omitempty" gorm:"serializer:json"`
+	WecomAppRequestConfig    *WecomAppRequestConfig    `json:"wecomapp_request_config,omitempty" gorm:"serializer:json"`
+	// 兼容旧版本
+	DingtalkRequestConfig *DingtalkRequestConfig `json:"dingtalk_request_config,omitempty" gorm:"serializer:json"`
+	FeishuRequestConfig   *FeishuRequestConfig   `json:"feishu_request_config,omitempty" gorm:"serializer:json"`
+	WecomRequestConfig    *WecomRequestConfig    `json:"wecom_request_config,omitempty" gorm:"serializer:json"`
 }
 
 // NotifyParamConfig 参数配置
@@ -96,6 +88,15 @@ type FlashDutyRequestConfig struct {
 	Timeout        int    `json:"timeout"`     // 超时时间（毫秒）
 	RetryTimes     int    `json:"retry_times"` // 重试次数
 	RetrySleep     int    `json:"retry_sleep"` // 重试等待时间（毫秒）
+}
+
+// PagerDutyRequestConfig PagerDuty 类型的参数配置
+type PagerDutyRequestConfig struct {
+	Proxy      string `json:"proxy"`
+	ApiKey     string `json:"api_key"`     // PagerDuty 账户或用户的 API Key，不是集成的 Integration Key (routing key)
+	Timeout    int    `json:"timeout"`     // 超时时间（毫秒）
+	RetryTimes int    `json:"retry_times"` // 重试次数
+	RetrySleep int    `json:"retry_sleep"` // 重试等待时间（毫秒）
 }
 
 // ParamItem 自定义参数项
@@ -136,6 +137,51 @@ type HTTPRequestConfig struct {
 	Request       RequestDetail     `json:"request"`
 }
 
+type DingtalkAppRequestConfig struct {
+	AppKey     string `json:"app_key"`
+	AppSecret  string `json:"app_secret"`
+	Proxy      string `json:"proxy"`
+	Timeout    int    `json:"timeout"`     // 超时时间（毫秒）
+	RetryTimes int    `json:"retry_times"` // 重试次数
+	RetrySleep int    `json:"retry_sleep"` // 重试等待时间（毫秒）
+}
+
+type FeishuAppRequestConfig struct {
+	AppID         string `json:"app_id"`
+	AppSecret     string `json:"app_secret"`
+	ReceiveIDType string `json:"receive_id_type,omitempty"`
+	Proxy         string `json:"proxy"`
+	Timeout       int    `json:"timeout"`     // 超时时间（毫秒）
+	RetryTimes    int    `json:"retry_times"` // 重试次数
+	RetrySleep    int    `json:"retry_sleep"` // 重试等待时间（毫秒）
+}
+
+type FeishuRequestConfig struct {
+	AppID     string `json:"app_id"`
+	AppSecret string `json:"app_secret"`
+}
+
+type DingtalkRequestConfig struct {
+	AppKey    string `json:"app_key"`
+	AppSecret string `json:"app_secret"`
+}
+
+type WecomRequestConfig struct {
+	CorpID     string `json:"corp_id"`
+	CorpSecret string `json:"corp_secret"`
+	AgentID    int    `json:"agent_id"`
+}
+
+type WecomAppRequestConfig struct {
+	CorpID     string `json:"corp_id"`
+	CorpSecret string `json:"corp_secret"`
+	AgentID    int    `json:"agent_id"`
+	Proxy      string `json:"proxy"`
+	Timeout    int    `json:"timeout"`     // 超时时间（毫秒）
+	RetryTimes int    `json:"retry_times"` // 重试次数
+	RetrySleep int    `json:"retry_sleep"` // 重试等待时间（毫秒）
+}
+
 // TLSConfig TLS 配置
 type TLSConfig struct {
 	Enable     bool   `json:"enable"`
@@ -150,108 +196,6 @@ type RequestDetail struct {
 	Parameters map[string]string `json:"parameters"` // URL 参数
 	Form       string            `json:"form"`       // 来源
 	Body       string            `json:"body"`       // 请求体
-}
-
-func (ncc *NotifyChannelConfig) SendScript(events []*AlertCurEvent, tpl map[string]interface{}, params map[string]string, sendtos []string) (string, string, error) {
-	config := ncc.RequestConfig.ScriptRequestConfig
-	if config.Script == "" && config.Path == "" {
-		return "", "", fmt.Errorf("script or path is empty")
-	}
-
-	fpath := ".notify_script_" + strconv.FormatInt(ncc.ID, 10)
-	if config.Path != "" {
-		fpath = config.Path
-	} else {
-		rewrite := true
-		if file.IsExist(fpath) {
-			oldContent, err := file.ToString(fpath)
-			if err != nil {
-				return "", "", fmt.Errorf("failed to read script file: %v", err)
-			}
-
-			if oldContent == config.Script {
-				rewrite = false
-			}
-		}
-
-		if rewrite {
-			_, err := file.WriteString(fpath, config.Script)
-			if err != nil {
-				return "", "", fmt.Errorf("failed to write script file: %v", err)
-			}
-
-			err = os.Chmod(fpath, 0777)
-			if err != nil {
-				return "", "", fmt.Errorf("failed to chmod script file: %v", err)
-			}
-		}
-
-		cur, _ := os.Getwd()
-		fpath = path.Join(cur, fpath)
-	}
-
-	cmd := exec.Command(fpath)
-	cmd.Stdin = bytes.NewReader(getStdinBytes(events, tpl, params, sendtos))
-
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-
-	err, isTimeout := cmdx.RunTimeout(cmd, time.Duration(config.Timeout)*time.Millisecond)
-	logger.Infof("event_script_notify_result: exec %s output: %s isTimeout: %v err: %v stdin: %s", fpath, buf.String(), isTimeout, err, string(getStdinBytes(events, tpl, params, sendtos)))
-
-	res := buf.String()
-
-	// 截断超出长度的输出
-	if len(res) > 512 {
-		// 确保在有效的UTF-8字符边界处截断
-		validLen := 0
-		for i := 0; i < 512 && i < len(res); {
-			_, size := utf8.DecodeRuneInString(res[i:])
-			if i+size > 512 {
-				break
-			}
-			i += size
-			validLen = i
-		}
-		res = res[:validLen] + "..."
-	}
-
-	if isTimeout {
-		if err == nil {
-			return cmd.String(), res, errors.New("timeout and killed process")
-		}
-
-		return cmd.String(), res, err
-	}
-	if err != nil {
-		return cmd.String(), res, fmt.Errorf("failed to execute script: %v", err)
-	}
-
-	return cmd.String(), res, nil
-}
-
-func getStdinBytes(events []*AlertCurEvent, tpl map[string]interface{}, params map[string]string, sendtos []string) []byte {
-	if len(events) == 0 {
-		return []byte("")
-	}
-
-	// 创建一个 map 来存储所有数据
-	data := map[string]interface{}{
-		"event":   events[0],
-		"events":  events,
-		"tpl":     tpl,
-		"params":  params,
-		"sendtos": sendtos,
-	}
-
-	// 将数据序列化为 JSON 字节数组
-	jsonBytes, err := json.Marshal(data)
-	if err != nil {
-		return nil
-	}
-
-	return jsonBytes
 }
 
 func NotifyChannelStatistics(ctx *ctx.Context) (*Statistics, error) {
@@ -311,19 +255,88 @@ func NotifyChannelGets(ctx *ctx.Context, id int64, name, ident string, enabled i
 	return channels, err
 }
 
+// NotifyChannelIdentsGet 按 id 批量查出 channelID -> ident 映射，供读接口回填展示。
+// 不过滤 enable，避免通知规则引用了已停用媒介时展示为空。
+func NotifyChannelIdentsGet(ctx *ctx.Context, ids []int64) (map[int64]string, error) {
+	ret := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return ret, nil
+	}
+
+	var channels []*NotifyChannelConfig
+	err := DB(ctx).Select("id", "ident").Where("id in ?", ids).Find(&channels).Error
+	if err != nil {
+		return nil, err
+	}
+
+	for _, c := range channels {
+		ret[c.ID] = c.Ident
+	}
+	return ret, nil
+}
+
 func GetHTTPClient(nc *NotifyChannelConfig) (*http.Client, error) {
-	if nc.RequestConfig == nil || nc.RequestConfig.HTTPRequestConfig == nil {
-		return nil, fmt.Errorf("%+v http request config not found", nc)
+	if nc.RequestConfig == nil {
+		return nil, fmt.Errorf("%+v request config not found", nc)
 	}
 
 	httpConfig := nc.RequestConfig.HTTPRequestConfig
-
+	if httpConfig == nil {
+		httpConfig = &HTTPRequestConfig{
+			Timeout:       10000,
+			Concurrency:   5,
+			RetryTimes:    3,
+			RetryInterval: 100,
+		}
+	}
+	// 设置代理
+	var proxyFunc func(*http.Request) (*url.URL, error)
+	proxy := httpConfig.Proxy
 	// 对于 FlashDuty 类型，优先使用 FlashDuty 配置中的超时时间
 	timeout := httpConfig.Timeout
 	if nc.RequestType == "flashduty" && nc.RequestConfig.FlashDutyRequestConfig != nil {
 		flashDutyTimeout := nc.RequestConfig.FlashDutyRequestConfig.Timeout
 		if flashDutyTimeout > 0 {
 			timeout = flashDutyTimeout
+		}
+		if nc.RequestConfig.FlashDutyRequestConfig.Proxy != "" {
+			proxy = nc.RequestConfig.FlashDutyRequestConfig.Proxy
+		}
+	}
+
+	// 对于 PagerDuty 类型，优先使用 PagerDuty 配置中的代理
+	if nc.RequestType == "pagerduty" && nc.RequestConfig.PagerDutyRequestConfig != nil && nc.RequestConfig.PagerDutyRequestConfig.Proxy != "" {
+		proxy = nc.RequestConfig.PagerDutyRequestConfig.Proxy
+	}
+	// TODO(dingtalkapp): 钉钉应用本次不上线，DingtalkApp 超时/代理合并分支先注释；上线时恢复。
+	// if nc.RequestType == "dingtalkapp" && nc.RequestConfig.DingtalkAppRequestConfig != nil {
+	// 	dingtalkAppTimeout := nc.RequestConfig.DingtalkAppRequestConfig.Timeout
+	// 	if dingtalkAppTimeout > 0 {
+	// 		timeout = dingtalkAppTimeout
+	// 	}
+	// 	if nc.RequestConfig.DingtalkAppRequestConfig.Proxy != "" {
+	// 		proxy = nc.RequestConfig.DingtalkAppRequestConfig.Proxy
+	// 	}
+	// }
+	// 对于 FeishuApp 类型，优先使用 FeishuApp 配置中的超时时间和代理
+	if nc.RequestType == "feishuapp" && nc.RequestConfig.FeishuAppRequestConfig != nil {
+		feishuAppTimeout := nc.RequestConfig.FeishuAppRequestConfig.Timeout
+		if feishuAppTimeout > 0 {
+			timeout = feishuAppTimeout
+		}
+		if nc.RequestConfig.FeishuAppRequestConfig.Proxy != "" {
+			proxy = nc.RequestConfig.FeishuAppRequestConfig.Proxy
+		}
+	}
+
+	// 对于 WecomApp 类型，优先使用 WecomApp 配置中的超时时间和代理
+	if nc.RequestType == "wecomapp" && nc.RequestConfig.WecomAppRequestConfig != nil {
+		wecomAppTimeout := nc.RequestConfig.WecomAppRequestConfig.Timeout
+		if wecomAppTimeout > 0 {
+			timeout = wecomAppTimeout
+		}
+		if nc.RequestConfig.WecomAppRequestConfig.Proxy != "" {
+			proxy = nc.RequestConfig.WecomAppRequestConfig.Proxy
 		}
 	}
 
@@ -342,10 +355,8 @@ func GetHTTPClient(nc *NotifyChannelConfig) (*http.Client, error) {
 		httpConfig.RetryInterval = 100
 	}
 
-	// 设置代理
-	var proxyFunc func(*http.Request) (*url.URL, error)
-	if httpConfig.Proxy != "" {
-		proxyURL, err := url.Parse(httpConfig.Proxy)
+	if proxy != "" {
+		proxyURL, err := url.Parse(proxy)
 		if err != nil {
 			return nil, fmt.Errorf("invalid proxy URL: %v", err)
 		}
@@ -372,486 +383,6 @@ func GetHTTPClient(nc *NotifyChannelConfig) (*http.Client, error) {
 	return client, nil
 }
 
-func (ncc *NotifyChannelConfig) makeHTTPRequest(httpConfig *HTTPRequestConfig, url string, headers map[string]string, parameters map[string]string, body []byte) (*http.Request, error) {
-	req, err := http.NewRequest(httpConfig.Method, url, bytes.NewBuffer(body))
-	if err != nil {
-		logger.Errorf("failed to create request: %v", err)
-		return nil, err
-	}
-
-	query := req.URL.Query()
-	// 设置请求头 腾讯云短信、语音特殊处理
-	if ncc.Ident == "tx-sms" || ncc.Ident == "tx-voice" {
-		headers = ncc.setTxHeader(headers, body)
-		for key, value := range headers {
-			req.Header.Add(key, value)
-		}
-	} else if ncc.Ident == "ali-sms" || ncc.Ident == "ali-voice" {
-		req, err = http.NewRequest(httpConfig.Method, url, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		query, headers = ncc.getAliQuery(ncc.Ident, query, httpConfig.Request.Parameters["AccessKeyId"], httpConfig.Request.Parameters["AccessKeySecret"], parameters)
-		for key, value := range headers {
-			req.Header.Set(key, value)
-		}
-	} else {
-		for key, value := range headers {
-			req.Header.Add(key, value)
-		}
-	}
-
-	if ncc.Ident != "ali-sms" && ncc.Ident != "ali-voice" {
-		for key, value := range parameters {
-			query.Add(key, value)
-		}
-	}
-
-	req.URL.RawQuery = query.Encode()
-	// 记录完整的请求信息
-	logger.Debugf("URL: %v, Method: %s, Headers: %+v, params: %+v, Body: %s", req.URL, req.Method, req.Header, query, string(body))
-
-	return req, nil
-}
-
-func (ncc *NotifyChannelConfig) makeFlashDutyRequest(url string, bodyBytes []byte, flashDutyChannelID int64) (*http.Request, error) {
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		return nil, err
-	}
-
-	// 设置 URL 参数
-	query := req.URL.Query()
-	if flashDutyChannelID != 0 {
-		// 如果 flashduty 有配置协作空间(channel_id)，则传入 channel_id 参数
-		query.Add("channel_id", strconv.FormatInt(flashDutyChannelID, 10))
-	}
-	req.URL.RawQuery = query.Encode()
-	req.Header.Add("Content-Type", "application/json")
-	return req, nil
-}
-
-func (ncc *NotifyChannelConfig) SendFlashDuty(events []*AlertCurEvent, flashDutyChannelID int64, client *http.Client) (string, error) {
-	// todo 每一个 channel 批量发送事件
-	if client == nil {
-		return "", fmt.Errorf("http client not found")
-	}
-
-	body, err := json.Marshal(events)
-	if err != nil {
-		return "", err
-	}
-
-	url := ncc.RequestConfig.FlashDutyRequestConfig.IntegrationUrl
-
-	retrySleep := time.Second
-	if ncc.RequestConfig.FlashDutyRequestConfig.RetrySleep > 0 {
-		retrySleep = time.Duration(ncc.RequestConfig.FlashDutyRequestConfig.RetrySleep) * time.Millisecond
-	}
-
-	retryTimes := 3
-	if ncc.RequestConfig.FlashDutyRequestConfig.RetryTimes > 0 {
-		retryTimes = ncc.RequestConfig.FlashDutyRequestConfig.RetryTimes
-	}
-
-	// 把最后一次错误保存下来，后面返回，让用户在页面上也可以看到
-	var lastErrorMessage string
-	for i := 0; i <= retryTimes; i++ {
-		req, err := ncc.makeFlashDutyRequest(url, body, flashDutyChannelID)
-		if err != nil {
-			logger.Errorf("send_flashduty: failed to create request. url=%s request_body=%s error=%v", url, string(body), err)
-			return fmt.Sprintf("failed to create request. error: %v", err), err
-		}
-
-		// 直接使用客户端发送请求，超时时间已经在 client 中设置
-		resp, err := client.Do(req)
-		if err != nil {
-			logger.Errorf("send_flashduty: http_call=fail url=%s request_body=%s error=%v times=%d", url, string(body), err, i+1)
-			if i < retryTimes {
-				// 重试等待时间，后面要放到页面上配置
-				time.Sleep(retrySleep)
-			}
-			lastErrorMessage = err.Error()
-			continue
-		}
-
-		// 走到这里，说明请求 Flashduty 成功，不管 Flashduty 返回了什么结果，都不判断，仅保存，给用户查看即可
-		// 比如服务端返回 5xx，也不要重试，重试可能会导致服务端数据有问题。告警事件这样的东西，没有那么关键，只要最终能在 UI 上看到调用结果就行
-		var resBody []byte
-		if resp.Body != nil {
-			defer resp.Body.Close()
-
-			resBody, err = io.ReadAll(resp.Body)
-			if err != nil {
-				logger.Errorf("send_flashduty: failed to read response. request_body=%s, error=%v", string(body), err)
-				resBody = []byte("failed to read response. error: " + err.Error())
-			}
-		}
-
-		logger.Infof("send_flashduty: http_call=succ url=%s request_body=%s response_code=%d response_body=%s times=%d", url, string(body), resp.StatusCode, string(resBody), i+1)
-		return fmt.Sprintf("status_code:%d, response:%s", resp.StatusCode, string(resBody)), nil
-	}
-
-	return lastErrorMessage, errors.New("failed to send request")
-}
-
-func (ncc *NotifyChannelConfig) SendHTTP(events []*AlertCurEvent, tpl map[string]interface{}, params map[string]string, sendtos []string, client *http.Client) (string, error) {
-	if client == nil {
-		return "", fmt.Errorf("http client not found")
-	}
-
-	if len(events) == 0 {
-		return "", fmt.Errorf("events is empty")
-	}
-
-	httpConfig := ncc.RequestConfig.HTTPRequestConfig
-
-	// MessageTemplate
-	fullTpl := make(map[string]interface{})
-
-	fullTpl["sendtos"] = sendtos // 发送对象
-	fullTpl["params"] = params   // 自定义参数
-	fullTpl["tpl"] = tpl
-	fullTpl["events"] = events
-	fullTpl["event"] = events[0]
-
-	if len(sendtos) > 0 {
-		fullTpl["sendto"] = sendtos[0]
-	}
-
-	// 将 MessageTemplate 与变量配置的信息渲染进 reqBody
-	body, err := ncc.parseRequestBody(fullTpl)
-	if err != nil {
-		logger.Errorf("failed to parse request body: %v, event: %v", err, events)
-		return "", err
-	}
-
-	// 替换 URL Header Parameters 中的变量
-	url, headers, parameters := ncc.replaceVariables(fullTpl)
-	logger.Infof("url: %v, headers: %v, parameters: %v", url, headers, parameters)
-
-	// 重试机制
-	var lastErrorMessage string
-	for i := 0; i < httpConfig.RetryTimes; i++ {
-		var resp *http.Response
-		req, err := ncc.makeHTTPRequest(httpConfig, url, headers, parameters, body)
-		if err != nil {
-			logger.Errorf("send_http: failed to create request. url=%s request_body=%s error=%v", url, string(body), err)
-			return fmt.Sprintf("failed to create request. error: %v", err), err
-		}
-
-		resp, err = client.Do(req)
-		if err != nil {
-			logger.Errorf("send_http: failed to send http notify. url=%s request_body=%s error=%v", url, string(body), err)
-			lastErrorMessage = err.Error()
-			time.Sleep(time.Duration(httpConfig.RetryInterval) * time.Second)
-			continue
-		}
-		defer resp.Body.Close()
-
-		// 读取响应
-		body, err := io.ReadAll(resp.Body)
-		logger.Debugf("send http request: %+v, response: %+v, body: %+v", req, resp, string(body))
-		if err != nil {
-			logger.Errorf("send_http: failed to read response. url=%s request_body=%s error=%v", url, string(body), err)
-		}
-		if resp.StatusCode == http.StatusOK {
-			return string(body), nil
-		}
-
-		return "", fmt.Errorf("failed to send request, status code: %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	return lastErrorMessage, errors.New("all retries failed, last error: " + lastErrorMessage)
-}
-
-// getAliQuery 获取阿里云API的查询参数和请求头
-func (ncc *NotifyChannelConfig) getAliQuery(ident string, query url.Values, ak, sk string, params map[string]string) (url.Values, map[string]string) {
-	// 获取基础配置
-	httpConfig := ncc.RequestConfig.HTTPRequestConfig
-
-	httpMethod := "POST"
-	canonicalURI := "/"
-
-	var queryParams map[string]string
-	if ident == "ali-sms" {
-		queryParams = map[string]string{
-			"PhoneNumbers":  params["PhoneNumbers"],
-			"SignName":      params["SignName"],
-			"TemplateCode":  params["TemplateCode"],
-			"TemplateParam": params["TemplateParam"],
-		}
-	} else if ident == "ali-voice" {
-		queryParams = map[string]string{
-			"CalledNumber":     params["CalledNumber"],
-			"TtsCode":          params["TtsCode"],
-			"TtsParam":         params["TtsParam"],
-			"CalledShowNumber": params["CalledShowNumber"],
-		}
-	}
-
-	// 设置基础headers
-	headers := map[string]string{
-		"host":                  httpConfig.Headers["Host"],
-		"x-acs-version":         "2017-05-25",
-		"x-acs-date":            time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-		"x-acs-signature-nonce": uuid.New().String(),
-		"x-acs-content-sha256":  fmt.Sprintf("%x", sha256.Sum256([]byte(""))),
-	}
-
-	// 根据服务类型设置action
-	if ncc.Ident == "ali-sms" {
-		headers["x-acs-action"] = "SendSms"
-	} else if ncc.Ident == "ali-voice" {
-		headers["x-acs-action"] = "SingleCallByTts"
-	}
-
-	// 计算签名
-	signature, signedHeaders := getSignature(sk, httpMethod, canonicalURI, headers, queryParams, "")
-
-	// 添加授权头
-	headers["Authorization"] = fmt.Sprintf("ACS3-HMAC-SHA256 Credential=%s,SignedHeaders=%s,Signature=%s",
-		ak, signedHeaders, signature)
-
-	// 业务参数
-	for k, v := range queryParams {
-		query.Add(k, v)
-	}
-
-	query.Del("AccessKeyId")
-	query.Del("AccessKeySecret")
-
-	return query, headers
-}
-
-// getSignature 计算签名
-func getSignature(accessKeySecret string, httpMethod, canonicalURI string, headers map[string]string, queryParams map[string]string, body string) (string, string) {
-	// 1. 构造规范化请求
-	// 处理查询参数
-	var sortedQueryParams []string
-	for k, v := range queryParams {
-		sortedQueryParams = append(sortedQueryParams, fmt.Sprintf("%s=%s",
-			percentEncode(k), percentEncode(v)))
-	}
-	sort.Strings(sortedQueryParams)
-	canonicalQueryString := strings.Join(sortedQueryParams, "&")
-
-	// 处理请求头
-	var canonicalHeaders []string
-	var signedHeaders []string
-	for k, v := range headers {
-		lowerK := strings.ToLower(k)
-		if lowerK == "host" || lowerK == "content-type" || strings.HasPrefix(lowerK, "x-acs-") {
-			canonicalHeaders = append(canonicalHeaders, fmt.Sprintf("%s:%s", lowerK, strings.TrimSpace(v)))
-			signedHeaders = append(signedHeaders, lowerK)
-		}
-	}
-	sort.Strings(canonicalHeaders)
-	sort.Strings(signedHeaders)
-
-	canonicalHeadersStr := strings.Join(canonicalHeaders, "\n") + "\n"
-	signedHeadersStr := strings.Join(signedHeaders, ";")
-
-	// 计算body的hash值
-	h := sha256.New()
-	h.Write([]byte(body))
-	bodyHash := hex.EncodeToString(h.Sum(nil))
-
-	// 构造规范化请求
-	canonicalRequest := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s",
-		httpMethod, canonicalURI, canonicalQueryString, canonicalHeadersStr,
-		signedHeadersStr, bodyHash)
-
-	// 2. 构造待签名字符串
-	algorithm := "ACS3-HMAC-SHA256"
-	h = sha256.New()
-	h.Write([]byte(canonicalRequest))
-	canonicalRequestHash := hex.EncodeToString(h.Sum(nil))
-	stringToSign := fmt.Sprintf("%s\n%s", algorithm, canonicalRequestHash)
-
-	// 3. 计算签名
-	h = hmac.New(sha256.New, []byte(accessKeySecret))
-	h.Write([]byte(stringToSign))
-	signature := hex.EncodeToString(h.Sum(nil))
-
-	return signature, signedHeadersStr
-}
-
-func percentEncode(str string) string {
-	encoded := url.QueryEscape(str)
-	encoded = strings.ReplaceAll(encoded, "+", "%20")
-	encoded = strings.ReplaceAll(encoded, "*", "%2A")
-	encoded = strings.ReplaceAll(encoded, "%7E", "~")
-	return encoded
-}
-
-func (ncc *NotifyChannelConfig) setTxHeader(headers map[string]string, payloadBytes []byte) map[string]string {
-	timestamp := time.Now().Unix()
-
-	authorization := ncc.getTxSignature(string(payloadBytes), timestamp)
-	headers["X-TC-Timestamp"] = fmt.Sprintf("%d", timestamp)
-	headers["Authorization"] = authorization
-
-	return headers
-}
-
-func (ncc *NotifyChannelConfig) getTxSignature(payloadStr string, timestamp int64) string {
-	httpConfig := ncc.RequestConfig.HTTPRequestConfig
-
-	canonicalHeaders := fmt.Sprintf("content-type:application/json\nhost:%s\nx-tc-action:%s\n",
-		httpConfig.Headers["Host"], strings.ToLower(httpConfig.Headers["X-TC-Action"]))
-
-	hasher := sha256.New()
-	hasher.Write([]byte(payloadStr))
-	hashedRequestPayload := hex.EncodeToString(hasher.Sum(nil))
-	canonicalRequest := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s",
-		httpConfig.Method,
-		"/",
-		"",
-		canonicalHeaders,
-		"content-type;host;x-tc-action",
-		hashedRequestPayload)
-
-	// 1. 生成日期
-	date := time.Unix(timestamp, 0).UTC().Format("2006-01-02")
-	// 2. 拼接待签名字符串
-	credentialScope := fmt.Sprintf("%s/%s/tc3_request", date, httpConfig.Headers["Service"])
-	hasher = sha256.New()
-	hasher.Write([]byte(canonicalRequest))
-	hashedCanonicalRequest := hex.EncodeToString(hasher.Sum(nil))
-	stringToSign := fmt.Sprintf("TC3-HMAC-SHA256\n%d\n%s\n%s",
-		timestamp,
-		credentialScope,
-		hashedCanonicalRequest)
-	// 3. 计算签名
-	secretDate := sign([]byte("TC3"+httpConfig.Headers["Secret_Key"]), date)
-	secretService := sign(secretDate, httpConfig.Headers["Service"])
-	secretSigning := sign(secretService, "tc3_request")
-	signature := hex.EncodeToString(sign(secretSigning, stringToSign))
-	// 4. 组织Authorization
-	authorization := fmt.Sprintf("TC3-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-		httpConfig.Headers["Secret_ID"], credentialScope, "content-type;host;x-tc-action", signature)
-	return authorization
-}
-
-func sign(key []byte, msg string) []byte {
-	h := hmac.New(sha256.New, key)
-	h.Write([]byte(msg))
-	return h.Sum(nil)
-}
-
-func (ncc *NotifyChannelConfig) parseRequestBody(bodyTpl map[string]interface{}) ([]byte, error) {
-	var defs = []string{
-		"{{$tpl := .tpl}}",
-		"{{$sendto := .sendto}}",
-		"{{$sendtos := .sendtos}}",
-		"{{$params := .params}}",
-		"{{$events := .events}}",
-		"{{$event := .event}}",
-	}
-
-	text := strings.Join(append(defs, ncc.RequestConfig.HTTPRequestConfig.Request.Body), "")
-	tpl, err := template.New("requestBody").Funcs(tplx.TemplateFuncMap).Parse(text)
-	if err != nil {
-		return nil, err
-	}
-
-	var body bytes.Buffer
-	err = tpl.Execute(&body, bodyTpl)
-	return body.Bytes(), err
-}
-
-func getParsedString(name, tplStr string, tplData map[string]interface{}) string {
-	var defs = []string{
-		"{{$tpl := .tpl}}",
-		"{{$sendto := .sendto}}",
-		"{{$sendtos := .sendtos}}",
-		"{{$params := .params}}",
-		"{{$events := .events}}",
-		"{{$event := .event}}",
-	}
-
-	text := strings.Join(append(defs, tplStr), "")
-	tpl, err := template.New(name).Funcs(tplx.TemplateFuncMap).Parse(text)
-	if err != nil {
-		return ""
-	}
-	var body bytes.Buffer
-	err = tpl.Execute(&body, tplData)
-	if err != nil {
-		return fmt.Sprintf("failed to parse template: %v data: %v", err, tplData)
-	}
-
-	return body.String()
-}
-
-func (ncc *NotifyChannelConfig) replaceVariables(tpl map[string]interface{}) (string, map[string]string, map[string]string) {
-	httpConfig := ncc.RequestConfig.HTTPRequestConfig
-	url := ""
-	headers := make(map[string]string)
-	parameters := make(map[string]string)
-
-	if needsTemplateRendering(httpConfig.URL) {
-		logger.Infof("replace variables url: %s tpl: %+v", httpConfig.URL, tpl)
-		url = getParsedString("url", httpConfig.URL, tpl)
-	} else {
-		url = httpConfig.URL
-	}
-
-	for key, value := range httpConfig.Headers {
-		if needsTemplateRendering(value) {
-			headers[key] = getParsedString(key, value, tpl)
-		} else {
-			headers[key] = value
-		}
-	}
-
-	for key, value := range httpConfig.Request.Parameters {
-		if needsTemplateRendering(value) {
-			parameters[key] = getParsedString(key, value, tpl)
-		} else {
-			parameters[key] = value
-		}
-	}
-
-	return url, headers, parameters
-}
-
-// needsTemplateRendering 检查字符串是否包含模板语法
-func needsTemplateRendering(s string) bool {
-	return strings.Contains(s, "{{") && strings.Contains(s, "}}")
-}
-
-func (ncc *NotifyChannelConfig) SendEmail(notifyRuleId int64, events []*AlertCurEvent, tpl map[string]interface{}, sendtos []string, ch chan *EmailContext) {
-	m := gomail.NewMessage()
-	m.SetHeader("From", ncc.RequestConfig.SMTPRequestConfig.From)
-	m.SetHeader("To", sendtos...)
-	m.SetHeader("Subject", tpl["subject"].(string))
-	m.SetBody("text/html", tpl["content"].(string))
-	ch <- &EmailContext{notifyRuleId, events, m}
-}
-
-func (ncc *NotifyChannelConfig) SendEmailNow(events []*AlertCurEvent, tpl map[string]interface{}, sendtos []string) error {
-
-	d := gomail.NewDialer(ncc.RequestConfig.SMTPRequestConfig.Host, ncc.RequestConfig.SMTPRequestConfig.Port, ncc.RequestConfig.SMTPRequestConfig.Username, ncc.RequestConfig.SMTPRequestConfig.Password)
-	if ncc.RequestConfig.SMTPRequestConfig.InsecureSkipVerify {
-		d.TLSConfig = &tls.Config{InsecureSkipVerify: true}
-	}
-	s, err := d.Dial()
-	if err != nil {
-		logger.Errorf("email_sender: failed to dial: %s", err)
-		return err
-	}
-
-	m := gomail.NewMessage()
-	m.SetHeader("From", ncc.RequestConfig.SMTPRequestConfig.From)
-	m.SetHeader("To", sendtos...)
-	m.SetHeader("Subject", tpl["subject"].(string))
-	m.SetBody("text/html", tpl["content"].(string))
-	return gomail.Send(s, m)
-}
-
 func (ncc *NotifyChannelConfig) Verify() error {
 	if ncc.Name == "" {
 		return errors.New("channel name cannot be empty")
@@ -865,8 +396,16 @@ func (ncc *NotifyChannelConfig) Verify() error {
 		return fmt.Errorf("channel identifier must be ^[a-zA-Z0-9_-]+$, current: %s", ncc.Ident)
 	}
 
-	if ncc.RequestType != "http" && ncc.RequestType != "smtp" && ncc.RequestType != "script" && ncc.RequestType != "flashduty" {
-		return errors.New("invalid request type, must be 'http', 'smtp' or 'script'")
+	// TODO(dingtalkapp): 钉钉应用本次不上线，白名单中暂不放行 dingtalkapp；上线时恢复下面两处注释行。
+	if ncc.RequestType != "http" &&
+		ncc.RequestType != "smtp" &&
+		ncc.RequestType != "script" &&
+		ncc.RequestType != "flashduty" &&
+		ncc.RequestType != "pagerduty" &&
+		// ncc.RequestType != "dingtalkapp" &&
+		ncc.RequestType != "feishuapp" &&
+		ncc.RequestType != "wecomapp" {
+		return errors.New("invalid request type, must be one of 'http', 'smtp', 'script', 'flashduty', 'pagerduty', 'feishuapp', 'wecomapp'")
 	}
 
 	if ncc.ParamConfig != nil {
@@ -878,25 +417,9 @@ func (ncc *NotifyChannelConfig) Verify() error {
 	}
 
 	// 校验 Request 配置
-	switch ncc.RequestType {
-	case "http":
-		if err := ncc.ValidateHTTPRequestConfig(); err != nil {
-			return err
-		}
-	case "smtp":
-		if err := ncc.ValidateSMTPRequestConfig(); err != nil {
-			return err
-		}
-	case "script":
-		if err := ncc.ValidateScriptRequestConfig(); err != nil {
-			return err
-		}
-	case "flashduty":
-		if err := ncc.ValidateFlashDutyRequestConfig(); err != nil {
-			return err
-		}
+	if VerifyByProvider != nil {
+		return VerifyByProvider(ncc)
 	}
-
 	return nil
 }
 
@@ -969,6 +492,13 @@ func (ncc *NotifyChannelConfig) ValidateFlashDutyRequestConfig() error {
 	return nil
 }
 
+func (ncc *NotifyChannelConfig) ValidatePagerDutyRequestConfig() error {
+	if ncc.RequestConfig.PagerDutyRequestConfig == nil {
+		return errors.New("pagerduty request config cannot be nil")
+	}
+	return nil
+}
+
 func (ncc *NotifyChannelConfig) Update(ctx *ctx.Context, ref NotifyChannelConfig) error {
 	ref.ID = ncc.ID
 	ref.CreateAt = ncc.CreateAt
@@ -1025,7 +555,40 @@ func (c NotiChList) IfUsed(nr *NotifyRule) bool {
 	return false
 }
 
+func (ncc *NotifyChannelConfig) Upsert(ctx *ctx.Context) error {
+	ch, err := NotifyChannelGet(ctx, "name = ?", ncc.Name)
+	if err != nil {
+		return errors.WithMessage(err, "notify channel init failed to get message tpl")
+	}
+
+	if ch == nil {
+		return Insert(ctx, ncc)
+	}
+
+	if ch.UpdateBy != "" && ch.UpdateBy != "system" {
+		return nil
+	}
+	return ch.Update(ctx, *ncc)
+}
+
+// Weight 用于页面元素排序，weight 越大 排序越靠后
 var NotiChMap = []*NotifyChannelConfig{
+	{
+		Name: "FlashDuty", Ident: "flashduty", RequestType: "flashduty", Weight: 1, Enable: true,
+		RequestConfig: &RequestConfig{
+			HTTPRequestConfig: &HTTPRequestConfig{
+				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
+				Headers: map[string]string{
+					"Content-Type": "application/json",
+				},
+			},
+			FlashDutyRequestConfig: &FlashDutyRequestConfig{
+				IntegrationUrl: "flashduty integration url",
+				Timeout:        5000,
+				RetryTimes:     3,
+			},
+		},
+	},
 	{
 		Name: "Callback", Ident: "callback", RequestType: "http", Weight: 2, Enable: true,
 		RequestConfig: &RequestConfig{
@@ -1048,319 +611,33 @@ var NotiChMap = []*NotifyChannelConfig{
 		},
 	},
 	{
-		Name: "Discord", Ident: Discord, RequestType: "http", Weight: 16, Enable: false,
+		Name: "Email", Ident: Email, RequestType: "smtp", Weight: 2, Enable: true,
 		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:    "{{$params.webhook_url}}",
-				Method: "POST", Headers: map[string]string{"Content-Type": "application/json"},
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Body: `{"content": "{{$tpl.content}}"}`,
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			Custom: Params{
-				Params: []ParamItem{
-					{Key: "webhook_url", CName: "Webhook Url", Type: "string"},
-				},
-			},
-		},
-	},
-	{
-		Name: "MattermostWebhook", Ident: MattermostWebhook, RequestType: "http", Weight: 15, Enable: false,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:    "{{$params.webhook_url}}",
-				Method: "POST", Headers: map[string]string{"Content-Type": "application/json"},
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Body: `{"text":  "{{$tpl.content}}"}`,
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			Custom: Params{
-				Params: []ParamItem{
-					{Key: "webhook_url", CName: "Webhook Url", Type: "string"},
-					{Key: "bot_name", CName: "Bot Name", Type: "string"},
-				},
-			},
-		},
-	},
-	{
-		Name: "MattermostBot", Ident: MattermostBot, RequestType: "http", Weight: 14, Enable: false,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:    "<your mattermost url>/api/v4/posts",
-				Method: "POST", Headers: map[string]string{"Content-Type": "application/json", "Authorization": "Bearer <you mattermost bot token>"},
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Body: `{"channel_id": "{{$params.channel_id}}", "message":  "{{$tpl.content}}"}`,
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			Custom: Params{
-				Params: []ParamItem{
-					{Key: "channel_id", CName: "Channel ID", Type: "string"},
-					{Key: "channel_name", CName: "Channel Name", Type: "string"},
-				},
-			},
-		},
-	},
-	{
-		Name: "SlackWebhook", Ident: SlackWebhook, RequestType: "http", Weight: 13, Enable: false,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:    "{{$params.webhook_url}}",
-				Method: "POST", Headers: map[string]string{"Content-Type": "application/json"},
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Body: `{"text":  "{{$tpl.content}}", "mrkdwn": true}`,
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			Custom: Params{
-				Params: []ParamItem{
-					{Key: "webhook_url", CName: "Webhook Url", Type: "string"},
-					{Key: "bot_name", CName: "Bot Name", Type: "string"},
-				},
-			},
-		},
-	},
-	{
-		Name: "SlackBot", Ident: SlackBot, RequestType: "http", Weight: 12, Enable: false,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:    "https://slack.com/api/chat.postMessage",
-				Method: "POST", Headers: map[string]string{"Content-Type": "application/json", "Authorization": "Bearer <you slack bot token>"},
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Body: `{"channel": "#{{$params.channel}}", "text":  "{{$tpl.content}}", "mrkdwn": true}`,
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			Custom: Params{
-				Params: []ParamItem{
-					{Key: "channel", CName: "channel", Type: "string"},
-					{Key: "channel_name", CName: "Channel Name", Type: "string"},
-				},
-			},
-		},
-	},
-	{
-		Name: "Tencent SMS", Ident: "tx-sms", RequestType: "http", Weight: 11, Enable: true,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				Method:  "POST",
-				URL:     "https://sms.tencentcloudapi.com",
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Body: `{"PhoneNumberSet":["{{ $sendto }}"],"SignName":"需要改为实际的签名","SmsSdkAppId":"需要改为实际的appid","TemplateId":"需要改为实际的模板id","TemplateParamSet":["{{$tpl.content}}"]}`,
-				},
-				Headers: map[string]string{
-					"Content-Type": "application/json",
-					"Host":         "sms.tencentcloudapi.com",
-					"X-TC-Action":  "SendSms",
-					"X-TC-Version": "2021-01-11",
-					"X-TC-Region":  "需要改为实际的region",
-					"Service":      "sms",
-					"Secret_ID":    "需要改为实际的secret_id",
-					"Secret_Key":   "需要改为实际的secret_key",
-				},
+			SMTPRequestConfig: &SMTPRequestConfig{
+				Host:               "smtp.host",
+				Port:               25,
+				Username:           "your-username",
+				Password:           "your-password",
+				From:               "your-email",
+				InsecureSkipVerify: true,
 			},
 		},
 		ParamConfig: &NotifyParamConfig{
 			UserInfo: &UserInfo{
-				ContactKey: "phone",
+				ContactKey: "email",
 			},
 		},
 	},
 	{
-		Name: "Tencent Voice", Ident: "tx-voice", RequestType: "http", Weight: 10, Enable: true,
+		Name: "Dingtalk", Ident: Dingtalk, RequestType: "http", Weight: 3, Enable: true,
 		RequestConfig: &RequestConfig{
 			HTTPRequestConfig: &HTTPRequestConfig{
-				Method:  "POST",
-				URL:     "https://vms.tencentcloudapi.com",
+				URL: "https://oapi.dingtalk.com/robot/send", Method: "POST",
+				Headers: map[string]string{"Content-Type": "application/json"},
 				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
 				Request: RequestDetail{
-					Body: `{"CalledNumber":"+86{{ $sendto }}","TemplateId":"需要改为实际的模板id","TemplateParamSet":["{{$tpl.content}}"],"VoiceSdkAppid":"需要改为实际的appid"}`,
-				},
-				Headers: map[string]string{
-					"Content-Type": "application/json",
-					"Host":         "vms.tencentcloudapi.com",
-					"X-TC-Action":  "SendTtsVoice",
-					"X-TC-Version": "2020-09-02",
-					"X-TC-Region":  "ap-beijing",
-					"Service":      "vms",
-					"Secret_ID":    "需要改为实际的secret_id",
-					"Secret_Key":   "需要改为实际的secret_key",
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			UserInfo: &UserInfo{
-				ContactKey: "phone",
-			},
-		},
-	},
-	{
-		Name: "Aliyun SMS", Ident: "ali-sms", RequestType: "http", Weight: 9, Enable: true,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				Method:  "POST",
-				URL:     "https://dysmsapi.aliyuncs.com",
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Parameters: map[string]string{
-						"PhoneNumbers":    "{{ $sendto }}",
-						"SignName":        "需要改为实际的签名",
-						"TemplateCode":    "需要改为实际的模板id",
-						"TemplateParam":   `{"incident":"故障{{$tpl.incident}}，请及时处理"}`,
-						"AccessKeyId":     "需要改为实际的access_key_id",
-						"AccessKeySecret": "需要改为实际的access_key_secret",
-					},
-				},
-				Headers: map[string]string{
-					"Content-Type": "application/json",
-					"Host":         "dysmsapi.aliyuncs.com",
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			UserInfo: &UserInfo{
-				ContactKey: "phone",
-			},
-		},
-	},
-	{
-		Name: "Aliyun Voice", Ident: "ali-voice", RequestType: "http", Weight: 8, Enable: true,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				Method:  "POST",
-				URL:     "https://dyvmsapi.aliyuncs.com",
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Parameters: map[string]string{
-						"TtsCode":          "需要改为实际的voice_code",
-						"TtsParam":         `{"incident":"故障{{$tpl.incident}}，一键认领请按1"}`,
-						"CalledNumber":     `{{ $sendto }}`,
-						"CalledShowNumber": `需要改为实际的show_number, 如果为空则不显示`,
-						"AccessKeyId":      "需要改为实际的access_key_id",
-						"AccessKeySecret":  "需要改为实际的access_key_secret",
-					},
-				},
-				Headers: map[string]string{
-					"Content-Type": "application/json",
-					"Host":         "dyvmsapi.aliyuncs.com",
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			UserInfo: &UserInfo{
-				ContactKey: "phone",
-			},
-		},
-	},
-	{
-		Name: "Telegram", Ident: Telegram, RequestType: "http", Weight: 7, Enable: true,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:    "https://api.telegram.org/bot{{$params.token}}/sendMessage",
-				Method: "POST", Headers: map[string]string{"Content-Type": "application/json"},
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Parameters: map[string]string{"chat_id": "{{$params.chat_id}}"},
-					Body:       `{"text":"{{$tpl.content}}","parse_mode": "HTML"}`,
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			Custom: Params{
-				Params: []ParamItem{
-					{Key: "token", CName: "Token", Type: "string"},
-					{Key: "chat_id", CName: "Chat Id", Type: "string"},
-					{Key: "bot_name", CName: "Bot Name", Type: "string"},
-				},
-			},
-		},
-	},
-	{
-		Name: "Lark", Ident: Lark, RequestType: "http", Weight: 6, Enable: true,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:    "https://open.larksuite.com/open-apis/bot/v2/hook/{{$params.token}}",
-				Method: "POST", Headers: map[string]string{"Content-Type": "application/json"},
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Body: `{"msg_type": "text", "content": {"text": "{{$tpl.content}}"}}`,
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			Custom: Params{
-				Params: []ParamItem{
-					{Key: "token", CName: "Token", Type: "string"},
-					{Key: "bot_name", CName: "Bot Name", Type: "string"},
-				},
-			},
-		},
-	},
-
-	{
-		Name: "Lark Card", Ident: LarkCard, RequestType: "http", Weight: 6, Enable: true,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:    "https://open.larksuite.com/open-apis/bot/v2/hook/{{$params.token}}",
-				Method: "POST", Headers: map[string]string{"Content-Type": "application/json"},
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Body: `{"msg_type": "interactive", "card": {"config": {"wide_screen_mode": true}, "header": {"title": {"content": "{{$tpl.title}}", "tag": "plain_text"}, "template": "{{if $event.IsRecovered}}green{{else}}red{{end}}"}, "elements": [{"tag": "markdown", "content": "{{$tpl.content}}"}]}}`,
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			Custom: Params{
-				Params: []ParamItem{
-					{Key: "token", CName: "Token", Type: "string"},
-					{Key: "bot_name", CName: "Bot Name", Type: "string"},
-				},
-			},
-		},
-	},
-	{
-		Name: "Feishu", Ident: Feishu, RequestType: "http", Weight: 5, Enable: true,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:    "https://open.feishu.cn/open-apis/bot/v2/hook/{{$params.access_token}}",
-				Method: "POST", Headers: map[string]string{"Content-Type": "application/json"},
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Body: `{"msg_type": "text", "content": {"text": "{{$tpl.content}}"}}`,
-				},
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			Custom: Params{
-				Params: []ParamItem{
-					{Key: "access_token", CName: "Access Token", Type: "string"},
-					{Key: "bot_name", CName: "Bot Name", Type: "string"},
-				},
-			},
-		},
-	},
-	{
-		Name: "Feishu Card", Ident: FeishuCard, RequestType: "http", Weight: 5, Enable: true,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				URL:    "https://open.feishu.cn/open-apis/bot/v2/hook/{{$params.access_token}}",
-				Method: "POST", Headers: map[string]string{"Content-Type": "application/json"},
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Request: RequestDetail{
-					Body: `{"msg_type": "interactive", "card": {"config": {"wide_screen_mode": true}, "header": {"title": {"content": "{{$tpl.title}}", "tag": "plain_text"}, "template": "{{if $event.IsRecovered}}green{{else}}red{{end}}"}, "elements": [{"tag": "markdown", "content": "{{$tpl.content}}"}]}}`,
+					Parameters: map[string]string{"access_token": "{{$params.access_token}}"},
+					Body:       `{"msgtype": "markdown", "markdown": {"title": "{{$tpl.title}}", "text": "{{$tpl.content}}\n{{batchContactsAts $sendtos}}"}, "at": {"atMobiles": {{batchContactsJsonMarshal $sendtos}} }}`,
 				},
 			},
 		},
@@ -1396,15 +673,14 @@ var NotiChMap = []*NotifyChannelConfig{
 		},
 	},
 	{
-		Name: "Dingtalk", Ident: Dingtalk, RequestType: "http", Weight: 3, Enable: true,
+		Name: "Feishu Card", Ident: FeishuCard, RequestType: "http", Weight: 5, Enable: true,
 		RequestConfig: &RequestConfig{
 			HTTPRequestConfig: &HTTPRequestConfig{
-				URL: "https://oapi.dingtalk.com/robot/send", Method: "POST",
-				Headers: map[string]string{"Content-Type": "application/json"},
+				URL:    "https://open.feishu.cn/open-apis/bot/v2/hook/{{$params.access_token}}",
+				Method: "POST", Headers: map[string]string{"Content-Type": "application/json"},
 				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
 				Request: RequestDetail{
-					Parameters: map[string]string{"access_token": "{{$params.access_token}}"},
-					Body:       `{"msgtype": "markdown", "markdown": {"title": "{{$tpl.title}}", "text": "{{$tpl.content}}\n{{batchContactsAts $sendtos}}"}, "at": {"atMobiles": {{batchContactsJsonMarshal $sendtos}} }}`,
+					Body: `{"msg_type": "interactive", "card": {"config": {"wide_screen_mode": true}, "header": {"title": {"content": "{{$tpl.title}}", "tag": "plain_text"}, "template": "{{if $event.IsRecovered}}green{{else}}red{{end}}"}, "elements": [{"tag": "markdown", "content": "{{$tpl.content}}"}]}}`,
 				},
 			},
 		},
@@ -1414,40 +690,6 @@ var NotiChMap = []*NotifyChannelConfig{
 					{Key: "access_token", CName: "Access Token", Type: "string"},
 					{Key: "bot_name", CName: "Bot Name", Type: "string"},
 				},
-			},
-		},
-	},
-	{
-		Name: "Email", Ident: Email, RequestType: "smtp", Weight: 2, Enable: true,
-		RequestConfig: &RequestConfig{
-			SMTPRequestConfig: &SMTPRequestConfig{
-				Host:               "smtp.host",
-				Port:               25,
-				Username:           "your-username",
-				Password:           "your-password",
-				From:               "your-email",
-				InsecureSkipVerify: true,
-			},
-		},
-		ParamConfig: &NotifyParamConfig{
-			UserInfo: &UserInfo{
-				ContactKey: "email",
-			},
-		},
-	},
-	{
-		Name: "FlashDuty", Ident: "flashduty", RequestType: "flashduty", Weight: 1, Enable: true,
-		RequestConfig: &RequestConfig{
-			HTTPRequestConfig: &HTTPRequestConfig{
-				Timeout: 10000, Concurrency: 5, RetryTimes: 3, RetryInterval: 100,
-				Headers: map[string]string{
-					"Content-Type": "application/json",
-				},
-			},
-			FlashDutyRequestConfig: &FlashDutyRequestConfig{
-				IntegrationUrl: "flashduty integration url",
-				Timeout:        5000, // 默认5秒超时
-				RetryTimes:     3,    // 默认重试3次
 			},
 		},
 	},
@@ -1468,20 +710,4 @@ func InitNotifyChannel(ctx *ctx.Context) {
 			logger.Warningf("notify channel init failed to upsert notify channels %v", err)
 		}
 	}
-}
-
-func (ncc *NotifyChannelConfig) Upsert(ctx *ctx.Context) error {
-	ch, err := NotifyChannelGet(ctx, "name = ?", ncc.Name)
-	if err != nil {
-		return errors.WithMessage(err, "notify channel init failed to get message tpl")
-	}
-
-	if ch == nil {
-		return Insert(ctx, ncc)
-	}
-
-	if ch.UpdateBy != "" && ch.UpdateBy != "system" {
-		return nil
-	}
-	return ch.Update(ctx, *ncc)
 }

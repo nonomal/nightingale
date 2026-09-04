@@ -16,6 +16,8 @@ import (
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/mitchellh/mapstructure"
 	"github.com/toolkits/pkg/logger"
+
+	"github.com/ccfos/nightingale/v6/pkg/logx"
 )
 
 const (
@@ -49,7 +51,12 @@ func (p *PostgreSQL) InitClient() error {
 		return fmt.Errorf("not found postgresql addr, please check datasource config")
 	}
 	for _, shard := range p.Shards {
-		if db, err := shard.NewConn(context.TODO(), "postgres"); err != nil {
+		dbName := shard.DB
+		if dbName == "" {
+			dbName = "postgres"
+		}
+
+		if db, err := shard.NewConn(context.TODO(), dbName); err != nil {
 			defer sqlbase.CloseDB(db)
 			return err
 		}
@@ -165,7 +172,7 @@ func (p *PostgreSQL) QueryData(ctx context.Context, query interface{}) ([]models
 	postgresqlQueryParam.SQL = formatSQLDatabaseNameWithRegex(postgresqlQueryParam.SQL)
 	if strings.Contains(postgresqlQueryParam.SQL, "$__") {
 		var err error
-		postgresqlQueryParam.SQL, err = macros.Macro(postgresqlQueryParam.SQL, postgresqlQueryParam.From, postgresqlQueryParam.To)
+		postgresqlQueryParam.SQL, err = macros.Macro(postgresqlQueryParam.SQL, postgresqlQueryParam.From, postgresqlQueryParam.To, PostgreSQLType)
 		if err != nil {
 			return nil, err
 		}
@@ -197,7 +204,7 @@ func (p *PostgreSQL) QueryData(ctx context.Context, query interface{}) ([]models
 	})
 
 	if err != nil {
-		logger.Warningf("query:%+v get data err:%v", postgresqlQueryParam, err)
+		logx.Warningf(ctx, "query:%+v get data err:%v", postgresqlQueryParam, err)
 		return []models.DataResp{}, err
 	}
 	data := make([]models.DataResp, 0)
@@ -210,7 +217,7 @@ func (p *PostgreSQL) QueryData(ctx context.Context, query interface{}) ([]models
 	}
 
 	// parse resp to time series data
-	logger.Infof("req:%+v keys:%+v \n data:%v", postgresqlQueryParam, postgresqlQueryParam.Keys, data)
+	logx.Infof(ctx, "req:%+v keys:%+v \n data:%v", postgresqlQueryParam, postgresqlQueryParam.Keys, data)
 
 	return data, nil
 }
@@ -233,7 +240,7 @@ func (p *PostgreSQL) QueryLog(ctx context.Context, query interface{}) ([]interfa
 	postgresqlQueryParam.SQL = formatSQLDatabaseNameWithRegex(postgresqlQueryParam.SQL)
 	if strings.Contains(postgresqlQueryParam.SQL, "$__") {
 		var err error
-		postgresqlQueryParam.SQL, err = macros.Macro(postgresqlQueryParam.SQL, postgresqlQueryParam.From, postgresqlQueryParam.To)
+		postgresqlQueryParam.SQL, err = macros.Macro(postgresqlQueryParam.SQL, postgresqlQueryParam.From, postgresqlQueryParam.To, PostgreSQLType)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -249,7 +256,7 @@ func (p *PostgreSQL) QueryLog(ctx context.Context, query interface{}) ([]interfa
 		Sql: postgresqlQueryParam.SQL,
 	})
 	if err != nil {
-		logger.Warningf("query:%+v get data err:%v", postgresqlQueryParam, err)
+		logx.Warningf(ctx, "query:%+v get data err:%v", postgresqlQueryParam, err)
 		return []interface{}{}, 0, err
 	}
 	logs := make([]interface{}, 0)

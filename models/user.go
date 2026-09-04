@@ -1,14 +1,18 @@
 package models
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
+	"github.com/ccfos/nightingale/v6/pkg/logx"
 	"github.com/ccfos/nightingale/v6/pkg/ormx"
 	"github.com/ccfos/nightingale/v6/pkg/poster"
 	"github.com/ccfos/nightingale/v6/pkg/secu"
@@ -40,13 +44,16 @@ const (
 	Lark              = "lark"
 	LarkCard          = "larkcard"
 	Phone             = "phone"
+	Jira              = "jira"
+	JSMAlert          = "jsm_alert"
 
-	DingtalkKey = "dingtalk_robot_token"
-	WecomKey    = "wecom_robot_token"
-	FeishuKey   = "feishu_robot_token"
-	MmKey       = "mm_webhook_url"
-	TelegramKey = "telegram_robot_token"
-	LarkKey     = "lark_robot_token"
+	DingtalkKey  = "dingtalk_robot_token"
+	WecomKey     = "wecom_robot_token"
+	FeishuKey    = "feishu_robot_token"
+	MmKey        = "mm_webhook_url"
+	TelegramKey  = "telegram_robot_token"
+	LarkKey      = "lark_robot_token"
+	PagerDutyKey = "pagerduty_key"
 
 	DingtalkDomain = "oapi.dingtalk.com"
 	WecomDomain    = "qyapi.weixin.qq.com"
@@ -141,6 +148,42 @@ func (u *User) CheckGroupPermission(ctx *ctx.Context, groupIds []int64) error {
 	return nil
 }
 
+// stripInvisibleChars removes invisible Unicode characters from a string
+// This includes zero-width spaces, control characters, and other invisible chars
+func stripInvisibleChars(s string) string {
+	return strings.Map(func(r rune) rune {
+		// Keep printable characters and common whitespace (space, tab, newline)
+		if unicode.IsPrint(r) || r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return r
+		}
+		// Remove invisible characters
+		return -1
+	}, s)
+}
+
+// stripInvisibleCharsFromContacts removes invisible characters from Contacts JSON values
+func stripInvisibleCharsFromContacts(contacts ormx.JSONObj) ormx.JSONObj {
+	if len(contacts) == 0 {
+		return contacts
+	}
+
+	var contactsMap map[string]string
+	if err := json.Unmarshal(contacts, &contactsMap); err != nil {
+		return contacts
+	}
+
+	for k, v := range contactsMap {
+		contactsMap[k] = stripInvisibleChars(v)
+	}
+
+	result, err := json.Marshal(contactsMap)
+	if err != nil {
+		return contacts
+	}
+
+	return ormx.JSONObj(result)
+}
+
 func (u *User) Verify() error {
 	u.Username = strings.TrimSpace(u.Username)
 
@@ -163,6 +206,9 @@ func (u *User) Verify() error {
 	if u.Email != "" && !str.IsMail(u.Email) {
 		return errors.New("Email invalid")
 	}
+
+	// Strip invisible characters from Contacts values
+	u.Contacts = stripInvisibleCharsFromContacts(u.Contacts)
 
 	if u.Phone != "" {
 		return u.EncryptPhone()
@@ -271,6 +317,18 @@ func (u *User) UpdatePassword(ctx *ctx.Context, password, updateBy string) error
 	}).Error
 }
 
+func (u *User) AddToUserGroups(ctx *ctx.Context, userGroupIds []int64) error {
+
+	count := len(userGroupIds)
+	for i := 0; i < count; i++ {
+		err := UserGroupMemberAdd(ctx, userGroupIds[i], u.Id)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func UpdateUserLastActiveTime(ctx *ctx.Context, userId int64, lastActiveTime int64) error {
 	return DB(ctx).Model(&User{}).Where("id = ?", userId).Updates(map[string]interface{}{
 		"last_active_time": lastActiveTime,
@@ -297,6 +355,11 @@ func (u *User) Del(ctx *ctx.Context) error {
 }
 
 func (u *User) ChangePassword(ctx *ctx.Context, oldpass, newpass string) error {
+	// SSO 用户（ldap/oidc/cas/oauth2/dingtalk等）且未设置本地密码，不支持本地修改密码
+	if u.Belong != "" && u.Password == "******" {
+		return fmt.Errorf("SSO user(%s) cannot change password locally, please change password in %s", u.Username, u.Belong)
+	}
+
 	_oldpass, err := CryptoPass(ctx, oldpass)
 	if err != nil {
 		return err
@@ -361,6 +424,80 @@ func UserMapGet(ctx *ctx.Context, where string, args ...interface{}) map[string]
 	return um
 }
 
+// UserNicknameMap returns a deduplicated username -> nickname map.
+func UserNicknameMap(ctx *ctx.Context, names []string) map[string]string {
+	m := make(map[string]string)
+	if len(names) == 0 {
+		return m
+	}
+	seen := make(map[string]struct{}, len(names))
+	unique := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		unique = append(unique, name)
+	}
+	if len(unique) == 0 {
+		return m
+	}
+	users := UserMapGet(ctx, "username in (?)", unique)
+	for username, user := range users {
+		m[username] = user.Nickname
+	}
+	return m
+}
+
+// FillUpdateByNicknames fills the UpdateByNickname field for each element in items
+// by looking up the UpdateBy username. Supports both []T and []*T slices.
+func FillUpdateByNicknames[T any](ctx *ctx.Context, items []T) {
+	if len(items) == 0 {
+		return
+	}
+
+	elemType := reflect.TypeOf(items).Elem()
+	isPtr := elemType.Kind() == reflect.Ptr
+	if isPtr {
+		elemType = elemType.Elem()
+	}
+
+	updateByField, ok1 := elemType.FieldByName("UpdateBy")
+	nicknameField, ok2 := elemType.FieldByName("UpdateByNickname")
+	if !ok1 || !ok2 {
+		return
+	}
+
+	names := make([]string, 0, len(items))
+	for i := range items {
+		v := reflect.ValueOf(&items[i]).Elem()
+		if isPtr {
+			if v.IsNil() {
+				continue
+			}
+			v = v.Elem()
+		}
+		names = append(names, v.FieldByIndex(updateByField.Index).String())
+	}
+
+	nm := UserNicknameMap(ctx, names)
+
+	for i := range items {
+		v := reflect.ValueOf(&items[i]).Elem()
+		if isPtr {
+			if v.IsNil() {
+				continue
+			}
+			v = v.Elem()
+		}
+		updateBy := v.FieldByIndex(updateByField.Index).String()
+		v.FieldByIndex(nicknameField.Index).SetString(nm[updateBy])
+	}
+}
+
 func UserGetByUsername(ctx *ctx.Context, username string) (*User, error) {
 	return UserGet(ctx, "username=?", username)
 }
@@ -405,6 +542,18 @@ func InitRoot(ctx *ctx.Context) bool {
 	if len(user.Password) > 31 {
 		// already done before
 		return false
+	}
+
+	// 查询用户个数
+	count, err := Count(DB(ctx).Model(&User{}))
+	if err != nil {
+		fmt.Println("failed to count user:", err)
+		os.Exit(1)
+	}
+
+	if count == 1 {
+		// 说明数据库只有一个 root 用户，并且 root 用户密码没有加密，需要初始化 salt
+		InitSalt(ctx)
 	}
 
 	newPass, err := CryptoPass(ctx, user.Password)
@@ -453,14 +602,14 @@ func incrLoginFailCount(ctx *ctx.Context, redisObj storage.Redis, username strin
 	}
 
 	if err != nil {
-		logger.Warningf("login_fail_count: failed to get redis value. key:%s, error:%s", key, err)
+		logx.Warningf(ctx.Ctx, "login_fail_count: failed to get redis value. key:%s, error:%s", key, err)
 		redisObj.Set(ctx.GetContext(), key, "1", duration)
 		return
 	}
 
 	count, err := strconv.ParseInt(val, 10, 64)
 	if err != nil {
-		logger.Warningf("login_fail_count: failed to parse int64. key:%s, error:%s", key, err)
+		logx.Warningf(ctx.Ctx, "login_fail_count: failed to parse int64. key:%s, error:%s", key, err)
 		redisObj.Set(ctx.GetContext(), key, "1", duration)
 		return
 	}
@@ -485,18 +634,18 @@ func PassLogin(ctx *ctx.Context, redis storage.Redis, username, pass string) (*U
 	if needCheck {
 		pair := strings.Fields(val)
 		if len(pair) != 2 {
-			logger.Warningf("login_fail_count config invalid: %s", val)
+			logx.Warningf(ctx.Ctx, "login_fail_count config invalid: %s", val)
 			needCheck = false
 		} else {
 			seconds, err = strconv.ParseInt(pair[0], 10, 64)
 			if err != nil {
-				logger.Warningf("login_fail_count seconds invalid: %s", pair[0])
+				logx.Warningf(ctx.Ctx, "login_fail_count seconds invalid: %s", pair[0])
 				needCheck = false
 			}
 
 			count, err = strconv.ParseInt(pair[1], 10, 64)
 			if err != nil {
-				logger.Warningf("login_fail_count count invalid: %s", pair[1])
+				logx.Warningf(ctx.Ctx, "login_fail_count count invalid: %s", pair[1])
 				needCheck = false
 			}
 		}

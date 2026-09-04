@@ -175,6 +175,14 @@ func GetTagFilters(jsonArr ormx.JSONArr) ([]TagFilter, error) {
 const TimeRange int = 0
 const Periodic int = 1
 
+// MuteType 屏蔽方式
+const (
+	// MuteTypeAll 屏蔽事件与通知：命中后事件不产生、也不通知（默认，兼容存量）
+	MuteTypeAll int = 0
+	// MuteTypeNotifyOnly 只屏蔽通知：命中后事件照常产生并记录，仅不发送通知
+	MuteTypeNotifyOnly int = 1
+)
+
 type AlertMute struct {
 	Id                int64          `json:"id" gorm:"primaryKey"`
 	GroupId           int64          `json:"group_id"`
@@ -183,7 +191,7 @@ type AlertMute struct {
 	Prod              string         `json:"prod"`
 	DatasourceIds     string         `json:"-" gorm:"datasource_ids"` // datasource ids
 	DatasourceIdsJson []int64        `json:"datasource_ids" gorm:"-"` // for fe
-	Cluster           string         `json:"cluster"`                 // take effect by clusters, seperated by space
+	Cluster           string         `json:"cluster"`                 // take effect by clusters, separated by space
 	Tags              ormx.JSONArr   `json:"tags"`
 	Cause             string         `json:"cause"`
 	Btime             int64          `json:"btime"`
@@ -192,6 +200,7 @@ type AlertMute struct {
 	Activated         int            `json:"activated" gorm:"-"` // 0: not activated, 1: activated
 	CreateBy          string         `json:"create_by"`
 	UpdateBy          string         `json:"update_by"`
+	UpdateByNickname  string         `json:"update_by_nickname" gorm:"-"`
 	CreateAt          int64          `json:"create_at"`
 	UpdateAt          int64          `json:"update_at"`
 	ITags             []TagFilter    `json:"-" gorm:"-"`     // inner tags
@@ -200,6 +209,7 @@ type AlertMute struct {
 	PeriodicMutesJson []PeriodicMute `json:"periodic_mutes" gorm:"-"`
 	Severities        string         `json:"-" gorm:"severities"`
 	SeveritiesJson    []int          `json:"severities" gorm:"-"`
+	MuteType          int            `json:"mute_type"` // 0: 屏蔽事件与通知（默认）; 1: 只屏蔽通知
 }
 
 type PeriodicMute struct {
@@ -373,11 +383,11 @@ func (m *AlertMute) FE2DB() error {
 	m.PeriodicMutes = string(periodicMutesBytes)
 
 	if len(m.SeveritiesJson) > 0 {
-		severtiesBytes, err := json.Marshal(m.SeveritiesJson)
+		severitiesBytes, err := json.Marshal(m.SeveritiesJson)
 		if err != nil {
 			return err
 		}
-		m.Severities = string(severtiesBytes)
+		m.Severities = string(severitiesBytes)
 	}
 
 	return nil
@@ -464,6 +474,19 @@ func AlertMuteDel(ctx *ctx.Context, ids []int64) error {
 		return nil
 	}
 	return DB(ctx).Where("id in ?", ids).Delete(new(AlertMute)).Error
+}
+
+// AlertMuteBatchDelete deletes time-range alert mutes that expired before the
+// given timestamp (etime > 0 AND etime < timestamp) and were created before
+// the timestamp. Periodic mutes are skipped. Optionally restrict to the
+// provided group IDs. Returns the number of rows deleted in this batch.
+func AlertMuteBatchDelete(ctx *ctx.Context, timestamp int64, groupIds []int64, limit int) (int64, error) {
+	db := DB(ctx).Where("mute_time_type = ? AND etime > 0 AND etime < ? AND create_at < ?", TimeRange, timestamp, timestamp)
+	if len(groupIds) > 0 {
+		db = db.Where("group_id IN (?)", groupIds)
+	}
+	res := db.Limit(limit).Delete(&AlertMute{})
+	return res.RowsAffected, res.Error
 }
 
 func AlertMuteStatistics(ctx *ctx.Context) (*Statistics, error) {

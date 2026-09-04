@@ -10,9 +10,9 @@ import (
 	"github.com/ccfos/nightingale/v6/models"
 	"github.com/ccfos/nightingale/v6/pkg/ctx"
 	"github.com/ccfos/nightingale/v6/pkg/strx"
+	"github.com/ccfos/nightingale/v6/pkg/ginx"
 
 	"github.com/gin-gonic/gin"
-	"github.com/toolkits/pkg/ginx"
 	"github.com/toolkits/pkg/logger"
 )
 
@@ -22,6 +22,20 @@ func getUserGroupIds(ctx *gin.Context, rt *Router, myGroups bool) ([]int64, erro
 	}
 	me := ctx.MustGet("user").(*models.User)
 	return models.MyGroupIds(rt.Ctx, me.Id)
+}
+
+// readEventIds 读取按事件 id 过滤的参数。事件 id 可能多达数千个，拼到 URL query 会超长被
+// nginx 以 414 中断，因此 POST 时改从请求体读取（数组）；GET 仍兼容 query，不影响其他调用方。
+func readEventIds(c *gin.Context) []int64 {
+	if c.Request.Method == http.MethodPost {
+		var f struct {
+			EventIds []int64 `json:"event_ids"`
+		}
+		if err := c.ShouldBindJSON(&f); err == nil && len(f.EventIds) > 0 {
+			return f.EventIds
+		}
+	}
+	return strx.IdsInt64ForAPI(ginx.QueryStr(c, "event_ids", ""), ",")
 }
 
 func (rt *Router) alertCurEventsCard(c *gin.Context) {
@@ -159,7 +173,7 @@ func (rt *Router) alertCurEventsList(c *gin.Context) {
 
 	dsIds := queryDatasourceIds(c)
 
-	eventIds := strx.IdsInt64ForAPI(ginx.QueryStr(c, "event_ids", ""), ",")
+	eventIds := readEventIds(c)
 
 	prod := ginx.QueryStr(c, "prods", "")
 	if prod == "" {
@@ -264,11 +278,11 @@ func GetCurEventDetail(ctx *ctx.Context, eid int64) (*models.AlertCurEvent, erro
 	event.NotifyVersion, err = GetEventNotifyVersion(ctx, event.RuleId, event.NotifyRuleIds)
 	ginx.Dangerous(err)
 
-	event.NotifyRules, err = GetEventNorifyRuleNames(ctx, event.NotifyRuleIds)
+	event.NotifyRules, err = GetEventNotifyRuleNames(ctx, event.NotifyRuleIds)
 	return event, err
 }
 
-func GetEventNorifyRuleNames(ctx *ctx.Context, notifyRuleIds []int64) ([]*models.EventNotifyRule, error) {
+func GetEventNotifyRuleNames(ctx *ctx.Context, notifyRuleIds []int64) ([]*models.EventNotifyRule, error) {
 	notifyRuleNames := make([]*models.EventNotifyRule, 0)
 	notifyRules, err := models.NotifyRulesGet(ctx, "id in ?", notifyRuleIds)
 	if err != nil {
@@ -293,6 +307,12 @@ func GetEventNotifyVersion(ctx *ctx.Context, ruleId int64, notifyRuleIds []int64
 	rule, err := models.AlertRuleGetById(ctx, ruleId)
 	if err != nil {
 		return 0, err
+	}
+	// Rule may have been deleted while the event row lives on (history events
+	// outlive their rules). AlertRuleGet returns (nil, nil) in that case;
+	// default to legacy version 0 instead of dereferencing.
+	if rule == nil {
+		return 0, nil
 	}
 	return rule.NotifyVersion, nil
 }
